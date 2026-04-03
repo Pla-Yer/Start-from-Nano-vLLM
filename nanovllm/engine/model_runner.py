@@ -23,7 +23,9 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # 只在进程组未初始化时才初始化
+        if not dist.is_initialized():
+            dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -53,10 +55,18 @@ class ModelRunner:
             dist.barrier()
             if self.rank == 0:
                 self.shm.unlink()
+        # 安全删除 CUDA graphs（只在存在时才删除）
         if not self.enforce_eager:
-            del self.graphs, self.graph_pool
+            if hasattr(self, 'graphs'):
+                del self.graphs
+            if hasattr(self, 'graph_pool'):
+                del self.graph_pool
+            if hasattr(self, 'graph_vars'):
+                del self.graph_vars
         torch.cuda.synchronize()
-        dist.destroy_process_group()
+        # 只在进程组已初始化时才销毁
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
     def loop(self):
         while True:

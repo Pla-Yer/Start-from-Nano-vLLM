@@ -56,33 +56,6 @@ class ModelRouter:
         self._record_route(self.default_model)
         return self.default_model
 
-    def route_by_complexity(self, prompt: str) -> str:
-        """
-        根据 prompt 复杂度选择模型
-
-        简单规则：
-        - 包含代码：使用大模型
-        - 包含数学：使用大模型
-        - 简单问答：使用小模型
-        """
-        prompt_lower = prompt.lower()
-
-        # 代码检测
-        code_indicators = ["```", "def ", "class ", "import ", "function ", "=>"]
-        if any(ind in prompt for ind in code_indicators):
-            self._record_route("complex")
-            return self.long_model
-
-        # 数学检测
-        math_indicators = ["=", "+", "-", "*", "/", "∫", "∑", "sqrt", "log"]
-        if sum(1 for ind in math_indicators if ind in prompt_lower) >= 2:
-            self._record_route("complex")
-            return self.long_model
-
-        # 简单问答
-        self._record_route("simple")
-        return self.default_model
-
     def _record_route(self, model: str):
         """记录路由统计"""
         if model not in self.route_stats:
@@ -96,29 +69,3 @@ class ModelRouter:
             "by_model": self.route_stats,
             "default_model": self.default_model,
         }
-
-
-class WeightedRouter(ModelRouter):
-    """加权路由器 - 支持多个模型权重"""
-
-    def __init__(self, config: dict, weights: dict[str, float] = None):
-        super().__init__(config)
-        self.weights = weights or {
-            "qwen3-0.6b": 0.7,
-            "qwen3-1.5b": 0.3,
-        }
-
-    def route(self, prompt: str, model_hint: Optional[str] = None) -> str:
-        """基于权重的路由"""
-        if model_hint:
-            return model_hint
-
-        # 使用随机选择（可以根据权重调整）
-        import random
-        model = random.choices(
-            list(self.weights.keys()),
-            weights=list(self.weights.values())
-        )[0]
-
-        self._record_route(model)
-        return model

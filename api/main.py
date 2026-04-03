@@ -3,6 +3,7 @@ nano-vllm API 服务入口
 OpenAI 兼容接口
 """
 import os
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -10,6 +11,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import yaml
 import uvicorn
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 from api.model_manager import ModelManager
 from api.router import ModelRouter
@@ -51,7 +59,8 @@ async def lifespan(app: FastAPI):
     # 关闭时清理
     print("\n🧹 收到退出信号，清理资源...")
     if model_manager:
-        model_manager.loaded_models.clear()
+        # 正确卸载所有模型
+        await model_manager.unload_all()
     print("👋 API 服务已关闭")
 
 

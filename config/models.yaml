@@ -9,31 +9,30 @@ models:
     max_num_batched_tokens: 16384
     max_num_seqs: 256
     max_model_len: 1024
-    gpu_memory_utilization: 0.9
+    gpu_memory_utilization: 0.7
     tensor_parallel_size: 1
     enforce_eager: false
     description: "Small model for fast responses"
 
   # Secondary model - larger capacity
-  qwen3-1.5b:
-    path: "/home/ttt/huggingface/Qwen3-0.6B/qwen/Qwen3-0.6B/"
-    enabled: false
+  qwen3-1.7b:
+    path: "/home/ttt/huggingface/Qwen3-1.7B/qwen/Qwen3-1.7B/"
+    enabled: true
     max_num_batched_tokens: 16384
     max_num_seqs: 256
     max_model_len: 4096
-    gpu_memory_utilization: 0.9
+    gpu_memory_utilization: 0.7
     tensor_parallel_size: 1
     enforce_eager: false
     description: "Medium model for complex tasks"
 
 # Default routing configuration
 routing:
-  default_model: "qwen3-0.6b"
-  # Route based on prompt length
+  default_model: "qwen3-1.7b"  # Route based on prompt length
   route_by_length:
     enabled: true
-    short_threshold: 100   # tokens
-    long_model: "qwen3-1.5b"
+    short_threshold: 10   # tokens
+    long_model: "qwen3-1.7b"
 
 # Queue configuration
 queue:

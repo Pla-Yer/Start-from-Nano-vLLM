@@ -5,6 +5,8 @@ import asyncio
 import json
 from datetime import datetime
 from typing import List, AsyncGenerator
+import torch
+import logging
 
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -13,6 +15,7 @@ from api.schemas import ChatCompletionRequest, ChatCompletionResponse
 from api.utils import messages_to_prompt
 
 router = APIRouter(prefix="/v1", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/chat/completions")
@@ -29,8 +32,21 @@ async def chat_completions(request: ChatCompletionRequest):
         request.model
     )
 
+    # 尝试加载模型（带 OOM 处理）
     if model_name not in model_manager.loaded_models:
-        await model_manager.load_model(model_name)
+        try:
+            await model_manager.load_model(model_name)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error(f"❌ OOM while loading model {model_name}: {e}")
+            # 尝试处理 OOM：卸载其他模型并重试
+            try:
+                model_config = model_manager.config["models"][model_name]
+                await model_manager.handle_oom_and_retry(model_name, model_config)
+            except Exception as retry_error:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Not enough GPU memory to load model {model_name}. Please try a smaller model or unload other models."
+                )
 
     if model_name not in model_manager.loaded_models:
         raise HTTPException(status_code=404, detail=f"Model {model_name} not found")
@@ -85,6 +101,15 @@ async def chat_completions(request: ChatCompletionRequest):
                 }
             )
 
+    except torch.cuda.OutOfMemoryError as e:
+        logger.error(f"❌ OOM during generation with model {model_name}: {e}")
+        # 卸载当前模型
+        logger.warning(f"🗑️ Unloading model {model_name} due to OOM...")
+        await model_manager.unload_model(model_name)
+        raise HTTPException(
+            status_code=503,
+            detail=f"GPU out of memory during generation. Model {model_name} has been unloaded. Please try again with a smaller model or shorter context."
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

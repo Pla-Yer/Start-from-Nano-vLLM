@@ -34,10 +34,18 @@ class LLMEngine:
         atexit.register(self.exit)
 
     def exit(self):
-        self.model_runner.call("exit")
-        del self.model_runner
-        for p in self.ps:
-            p.join() # wait for the process to exit
+        # 安全检查属性是否存在
+        if hasattr(self, 'model_runner') and self.model_runner is not None:
+            self.model_runner.call("exit")
+            del self.model_runner
+
+        # 等待子进程退出
+        if hasattr(self, 'ps'):
+            for p in self.ps:
+                try:
+                    p.join()  # wait for the process to exit
+                except:
+                    pass
 
     def add_request(self, prompt, sampling_params):
         if isinstance(prompt, str):

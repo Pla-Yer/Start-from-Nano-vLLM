@@ -19,7 +19,7 @@ client = OpenAI(
 )
 
 # 默认模型
-MODEL = "qwen3-0.6b"
+MODEL = "qwen3-1.7b"
 
 
 def chat(prompt: str, system: str = None, stream: bool = True):

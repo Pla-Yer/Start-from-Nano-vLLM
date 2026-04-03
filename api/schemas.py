@@ -43,13 +43,6 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
 
 
-class EmbeddingRequest(BaseModel):
-    """OpenAI Embedding 请求"""
-    model: Optional[str] = None
-    input: Union[str, List[str]]
-    user: Optional[str] = None
-
-
 # ========== Response Models ==========
 
 class UsageInfo(BaseModel):
@@ -97,12 +90,3 @@ class CompletionResponse(BaseModel):
     model: str
     choices: List[CompletionChoice]
     usage: UsageInfo
-
-
-class ModelInfo(BaseModel):
-    """模型信息"""
-    id: str
-    object: str = "model"
-    created: int
-    owned_by: str
-    permission: List[dict] = []
