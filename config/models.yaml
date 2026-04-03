@@ -1,0 +1,42 @@
+# Model Configuration
+# Each model can be loaded independently or together
+
+models:
+  # Primary model - Qwen3 based
+  qwen3-0.6b:
+    path: "/home/ttt/huggingface/Qwen3-0.6B/qwen/Qwen3-0.6B/"
+    enabled: true
+    max_num_batched_tokens: 16384
+    max_num_seqs: 256
+    max_model_len: 1024
+    gpu_memory_utilization: 0.9
+    tensor_parallel_size: 1
+    enforce_eager: false
+    description: "Small model for fast responses"
+
+  # Secondary model - larger capacity
+  qwen3-1.5b:
+    path: "/home/ttt/huggingface/Qwen3-0.6B/qwen/Qwen3-0.6B/"
+    enabled: false
+    max_num_batched_tokens: 16384
+    max_num_seqs: 256
+    max_model_len: 4096
+    gpu_memory_utilization: 0.9
+    tensor_parallel_size: 1
+    enforce_eager: false
+    description: "Medium model for complex tasks"
+
+# Default routing configuration
+routing:
+  default_model: "qwen3-0.6b"
+  # Route based on prompt length
+  route_by_length:
+    enabled: true
+    short_threshold: 100   # tokens
+    long_model: "qwen3-1.5b"
+
+# Queue configuration
+queue:
+  max_queue_size: 1000
+  timeout_seconds: 300
+  allow_batch_aggregation: true
