@@ -143,24 +143,23 @@ class ModelRunner:
         slot_mapping = []
         block_tables = None
         for seq in seqs:
-            seqlen = len(seq)
-            input_ids.extend(seq[seq.num_cached_tokens:])
-            positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
+            chunk_start = seq.num_cached_tokens
+            chunk_size = seq.prefill_chunk_size or (len(seq) - seq.num_cached_tokens)
+            chunk_end = chunk_start + chunk_size
+            input_ids.extend(seq[chunk_start:chunk_end])
+            positions.extend(list(range(chunk_start, chunk_end)))
+            seqlen_q = chunk_size
+            seqlen_k = chunk_end
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
             if not seq.block_table:    # warmup
                 continue
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
-                start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
-                    end = start + self.block_size
-                else:
-                    end = start + seq.last_block_num_tokens 
-                slot_mapping.extend(list(range(start, end)))
+            for pos in range(chunk_start, chunk_end):
+                block_idx = pos // self.block_size
+                slot = seq.block_table[block_idx] * self.block_size + pos % self.block_size
+                slot_mapping.append(slot)
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -198,11 +197,17 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        context = get_context()
+        decode_exceeds_graph_shape = (
+            not is_prefill
+            and not self.enforce_eager
+            and context.block_tables is not None
+            and context.block_tables.size(1) > self.graph_vars["block_tables"].size(1)
+        )
+        if is_prefill or self.enforce_eager or input_ids.size(0) > 512 or decode_exceeds_graph_shape:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
-            context = get_context()
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
             graph_vars = self.graph_vars
             graph_vars["input_ids"][:bs] = input_ids

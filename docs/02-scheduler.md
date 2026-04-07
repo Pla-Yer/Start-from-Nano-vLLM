@@ -1,4 +1,4 @@
-# 调度器设计：Prefill/Decode 分离策略
+# 调度器设计：Prefill/Decode 分离与 Chunked Prefill
 
 ## 1. 调度器核心职责
 
@@ -7,6 +7,7 @@
 2. **资源分配**：决定哪些序列可以运行，分配 KV Cache 块
 3. **Preemption**：内存不足时抢占低优先级序列
 4. **阶段判定**：区分 prefill（预填充）和 decode（解码）阶段
+5. **Chunked Prefill**：将长 prompt 拆成多个 chunk，按 step 与 decode 交替
 
 ---
 
@@ -60,61 +61,58 @@ while self.waiting and num_seqs < self.max_num_seqs:
 - Decode 阶段是内存密集型，小批量更高效
 - 混合调度可能导致互相阻塞
 
+### 3.1.1 为什么要引入 Chunked Prefill？
+
+传统实现里，只要 `waiting` 队列非空，调度器就会优先把整条 prompt 一次性做完 prefill。这种策略很直接，但在长 prompt 和短 prompt 混合的场景里会暴露两个问题：
+
+- 长 prompt 会持续占满 prefill token budget
+- decode 请求即使只差一个 step，也可能被长 prefill 阻塞很久
+
+nano-vllm 现在支持一个兼容当前执行栈的 chunked prefill 版本：
+
+- 每次 prefill 只处理 `prefill_chunk_size` 个 prompt token
+- 当 `waiting` 和 `running` 同时非空时，在 step 粒度对 `prefill chunk` 和 `decode` 交替调度
+
+```text
+prefill(chunk 1) -> decode -> prefill(chunk 2) -> decode -> ...
+```
+
+这样不需要在一个 CUDA batch 内真正混合 prefill 和 decode，也能先解决 decode starvation。
+
 ### 3.2 调度算法
 
-nano-vllm 的调度逻辑（`scheduler.py`）：
+nano-vllm 的调度逻辑（`scheduler.py`）可以概括为：
 
 ```python
 def schedule(self) -> tuple[list[Sequence], bool]:
-    # ===== 第一阶段：Prefill =====
-    scheduled_seqs = []
-    num_seqs = 0
-    num_batched_tokens = 0
+    if enable_chunked_prefill and waiting and running:
+        return alternate_prefill_and_decode()
 
-    while self.waiting and num_seqs < self.max_num_seqs:
-        seq = self.waiting[0]  # 取队首
+    scheduled = schedule_prefill()
+    if scheduled:
+        return scheduled, True
 
-        # 检查资源是否足够
-        if (num_batched_tokens + len(seq) > self.max_num_batched_tokens or
-            not self.block_manager.can_allocate(seq)):
-            break  # 资源不足，停止 prefill
+    scheduled = schedule_decode()
+    return scheduled, False
+```
 
-        # 分配资源
-        num_seqs += 1
-        self.block_manager.allocate(seq)
-        num_batched_tokens += len(seq) - seq.num_cached_tokens
+其中 `schedule_prefill()` 的核心变化是：调度器不再默认吞掉整条 prompt，而是给每个被选中的序列打上一个 `prefill_chunk_size`，`ModelRunner` 只消费这一段 prompt。
 
-        # 状态变更
-        seq.status = SequenceStatus.RUNNING
-        self.waiting.popleft()
-        self.running.append(seq)
-        scheduled_seqs.append(seq)
+```python
+token_budget = prefill_chunk_size if enable_chunked_prefill else max_num_batched_tokens
 
-    # 如果有 prefill 请求，返回 prefill
-    if scheduled_seqs:
-        return scheduled_seqs, True  # is_prefill=True
+while waiting and num_batched_tokens < token_budget:
+    seq = waiting[0]
+    if not seq.block_table:
+        block_manager.allocate(seq)
 
-    # ===== 第二阶段：Decode =====
-    while self.running and num_seqs < self.max_num_seqs:
-        seq = self.running.popleft()
+    chunk_size = min(seq.num_prompt_tokens_remaining, token_budget - num_batched_tokens)
+    seq.prefill_chunk_size = chunk_size
+    scheduled.append(seq)
 
-        # 检查是否可以追加（内存是否足够）
-        while not self.block_manager.can_append(seq):
-            if self.running:
-                # 抢占 running 队列最后一个序列
-                self.preempt(self.running.pop())
-            else:
-                # 没有其他序列可抢占，抢占当前序列
-                self.preempt(seq)
-                break
-        else:
-            # 成功分配内存
-            num_seqs += 1
-            self.block_manager.may_append(seq)
-            scheduled_seqs.append(seq)
-
-    self.running.extendleft(reversed(scheduled_seqs))
-    return scheduled_seqs, False  # is_prefill=False
+    if chunk_size == seq.num_prompt_tokens_remaining:
+        waiting.popleft()
+        running.append(seq)
 ```
 
 ### 3.3 调度流程图
@@ -125,23 +123,19 @@ def schedule(self) -> tuple[list[Sequence], bool]:
                     └─────────────────────────────────┘
                                      │
                     ┌────────────────▼────────────────┐
-                    │     waiting 队列有请求？        │
+                    │ waiting 与 running 同时非空？  │
                     └────────────────┬────────────────┘
                               Yes   │   No
-                    ┌───────────────┐ │
-                    ▼               ▼ ▼
-               ┌────────┐      ┌──────────────┐
-               │ Prefill│      │ Decode 阶段  │
-               │ 阶段   │      │ running 队列 │
-               └───┬────┘      └──────┬───────┘
-                   │                  │
-        ┌──────────┼──────────┐       │
-        ▼          ▼          ▼       ▼
-    资源足够？   达到 max   达到 max  内存不足？
-        │        seqs？    tokens？   │
-        ▼          ▼          ▼       ▼
-     分配块    停止 prefill 停止      Preemption
-                                  (抢占其他序列)
+                    ┌───────────────┘   └───────────────┐
+                    ▼                                   ▼
+            ┌────────────────┐                 ┌────────────────┐
+            │ 交替执行       │                 │ 常规流程       │
+            │ prefill/decode │                 │ prefill 优先   │
+            └───────┬────────┘                 └──────┬─────────┘
+                    │                                  │
+            ┌───────┴────────┐                 ┌───────┴────────┐
+            ▼                ▼                 ▼                ▼
+      prefill chunk      decode step        prefill          decode
 ```
 
 ---
@@ -181,6 +175,7 @@ def allocate(self, seq: Sequence):
 def preempt(self, seq: Sequence):
     # 释放序列的 KV Cache 块
     seq.status = SequenceStatus.WAITING
+    seq.prefill_chunk_size = 0
     self.block_manager.deallocate(seq)
 
     # 放回 waiting 队列队首
@@ -193,12 +188,17 @@ def preempt(self, seq: Sequence):
 
 ## 5. 后处理 (Postprocess)
 
-每次推理后需要更新序列状态：
+每次推理后需要更新序列状态。普通 decode 与 chunked prefill 的后处理不同：
 
 ```python
-def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
+def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
     for seq, token_id in zip(seqs, token_ids):
-        # 添加生成的 token
+        if is_prefill:
+            seq.num_cached_tokens += seq.prefill_chunk_size
+            if not seq.is_prefill_finished:
+                continue
+
+        # 只有最后一个 prefill chunk 或 decode step 才追加新 token
         seq.append_token(token_id)
 
         # 判断是否完成
@@ -210,13 +210,42 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
             self.running.remove(seq)
 ```
 
+也就是说：
+
+- 中间 prefill chunk 只负责把 KV 写入缓存，不会向用户产出 token
+- 只有最后一个 prefill chunk 才会生成首个 output token
+
+`BlockManager` 也做了一个配套修改：对于 cache miss 的 block，不会在 `allocate()` 时立刻注册到 prefix cache，而是等该 block 真正完成 prefill 后，再登记哈希。否则其他请求可能错误复用一个“已经分配但 KV 还没写完”的 block。
+
 **完成条件**：
 1. 遇到 EOS token 且未设置 `ignore_eos`
 2. 生成的 token 数达到上限 `max_tokens`
 
 ---
 
-## 6. 性能影响因素
+## 6. Chunked Prefill 配置
+
+```python
+llm = LLM(
+    model=model_path,
+    enable_chunked_prefill=True,
+    prefill_chunk_size=2048,
+)
+```
+
+| 参数 | 作用 |
+|------|------|
+| `enable_chunked_prefill` | 是否启用 chunked prefill |
+| `prefill_chunk_size` | 单次 prefill step 最多处理多少 prompt token |
+
+默认情况下：
+
+- `enable_chunked_prefill=False`
+- `prefill_chunk_size` 会回退到 `max_num_batched_tokens`
+
+---
+
+## 7. 性能影响因素
 
 ### 6.1 调度参数调优
 
@@ -237,13 +266,14 @@ nano-vllm 采用近似 FCFS + Preemptive 策略。
 
 ---
 
-## 7. 小结
+## 8. 小结
 
 调度器的核心设计：
 1. **双队列**：waiting（等待）和 running（运行）
-2. **Prefill 优先**：先处理 waiting 队列的 prefill 请求
+2. **Prefill 优先**：默认先处理 waiting 队列的 prefill 请求
 3. **资源限制**：通过 `max_num_batched_tokens` 和 `max_num_seqs` 控制
 4. **Preemption**：内存不足时抢占低优先级序列
 5. **Decode 处理**：running 队列中的序列执行 decode
+6. **Chunked Prefill**：长 prompt 可按 chunk 切分，并与 decode 在 step 粒度交替
 
 理解调度器是理解 vLLM 性能优化的关键，下一篇将深入 KV Cache 管理。

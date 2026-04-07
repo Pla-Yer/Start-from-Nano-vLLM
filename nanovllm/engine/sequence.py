@@ -55,6 +55,7 @@ class Sequence:
         self.num_tokens = len(self.token_ids)  # 总token数量
         self.num_prompt_tokens = len(token_ids)  # 原始prompt的token数量
         self.num_cached_tokens = 0  # 已缓存token数量，初始为0
+        self.prefill_chunk_size = 0  # 当前 step 计划处理的 prefill token 数
         self.block_table = []  # 块表，记录序列使用的物理块
         self.temperature = sampling_params.temperature  # 采样温度
         self.max_tokens = sampling_params.max_tokens  # 最大生成token数
@@ -86,6 +87,20 @@ class Sequence:
         等于总token数 - prompt token数
         """
         return self.num_tokens - self.num_prompt_tokens
+
+    @property
+    def num_prompt_tokens_remaining(self):
+        """
+        还剩多少 prompt token 没有写入 KV cache
+        """
+        return max(0, self.num_prompt_tokens - self.num_cached_tokens)
+
+    @property
+    def is_prefill_finished(self):
+        """
+        prompt 是否已经全部完成 prefill
+        """
+        return self.num_cached_tokens >= self.num_prompt_tokens
 
     @property
     def prompt_token_ids(self):
@@ -152,14 +167,14 @@ class Sequence:
         """
         用于序列化的方法，返回对象状态
         """
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.prefill_chunk_size, self.block_table,
                 self.token_ids if self.num_completion_tokens == 0 else self.last_token)
 
     def __setstate__(self, state):
         """
         用于反序列化的设置状态方法
         """
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.prefill_chunk_size, self.block_table = state[:-1]
         if self.num_completion_tokens == 0:
             self.token_ids = state[-1]
         else:

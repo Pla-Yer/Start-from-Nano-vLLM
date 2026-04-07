@@ -53,8 +53,8 @@ if __name__ == "__main__":
             exit(1)
     
     success = download_model_from_modelscope(
-        model_id="qwen/Qwen3-0.6B",  
-        local_dir="~/huggingface/Qwen3-0.6B/", 
+        model_id="qwen/Qwen3-1.7B",  
+        local_dir="~/huggingface/Qwen3-1.7B/", 
         revision='master'
     )
     

@@ -17,6 +17,12 @@ class Config:
     
     # 最大批处理token数量，限制单次批处理的最大token数
     max_num_batched_tokens: int = 16384
+
+    # 是否启用 chunked prefill，将长 prompt 分块处理
+    enable_chunked_prefill: bool = False
+
+    # 单次 prefill 最多处理多少 prompt tokens；None 表示沿用 max_num_batched_tokens
+    prefill_chunk_size: int | None = None
     
     # 最大批处理序列数量，限制单次批处理的最大序列数
     max_num_seqs: int = 512
@@ -53,6 +59,10 @@ class Config:
         """
         # 验证KV缓存块大小是256的倍数
         assert self.kvcache_block_size % 256 == 0, f"KV缓存块大小必须是256的倍数，当前值为{self.kvcache_block_size}"
+        if self.prefill_chunk_size is None:
+            self.prefill_chunk_size = self.max_num_batched_tokens
+        assert self.prefill_chunk_size > 0, "prefill_chunk_size 必须大于 0"
+        self.prefill_chunk_size = min(self.prefill_chunk_size, self.max_num_batched_tokens)
         
         # 如果未指定KV缓存块数量，则根据GPU内存使用率估算
         if self.num_kvcache_blocks == -1:

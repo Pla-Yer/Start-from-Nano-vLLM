@@ -99,13 +99,28 @@ class BlockManager:
                     # 如果块不在使用中，分配该块
                     block = self._allocate_block(block_id)
             
-            # 如果哈希有效，更新块内容和哈希表
-            if h != -1:
+            # cache miss 的块要等真正完成 prefill 后再登记哈希，避免 chunked prefill
+            # 下其他请求误复用尚未写完 KV 的 block。
+            if h != -1 and not cache_miss:
                 block.update(h, token_ids)
                 self.hash_to_block_id[h] = block_id
             
             # 将块ID添加到序列的块表中
             seq.block_table.append(block_id)
+
+    def cache_full_blocks(self, seq: Sequence, prev_num_cached_tokens: int, num_cached_tokens: int):
+        start_block = prev_num_cached_tokens // self.block_size
+        end_block = num_cached_tokens // self.block_size
+        for i in range(start_block, end_block):
+            block_id = seq.block_table[i]
+            block = self.blocks[block_id]
+            if block.hash != -1:
+                continue
+            token_ids = seq.block(i)
+            prefix = self.blocks[seq.block_table[i-1]].hash if i > 0 else -1
+            h = self.compute_hash(token_ids, prefix)
+            block.update(h, token_ids)
+            self.hash_to_block_id[h] = block_id
 
     def deallocate(self, seq: Sequence):
         """

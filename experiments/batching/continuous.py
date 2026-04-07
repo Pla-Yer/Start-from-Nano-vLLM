@@ -399,7 +399,7 @@ if __name__ == "__main__":
         "Tell me a joke.",
     ] * 8
 
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "models/Qwen3-0.6b-Instruct"
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "/home/ttt/huggingface/Qwen3-0.6B/qwen/Qwen3-0.6B"
 
     results = asyncio.run(
         compare_strategies(
